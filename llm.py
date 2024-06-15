@@ -8,14 +8,14 @@ import random
 # Hyperparameters
 batch_size = 64
 block_size = 15
-max_iters = 9000
-eval_interval = 900
+max_iters = 10000
+eval_interval = 1000
 learning_rate = 1e-2
 device = 'cpu'
 eval_iters = 200
-n_embed = 45
+n_embed = 256
 torch.manual_seed(1337)
-
+dropout = 0.2
 # Initialize encoding
 tokenizer = tiktoken.get_encoding("cl100k_base")
 
@@ -74,7 +74,8 @@ class Head(nn.Module):
         self.query = nn.Linear(n_embed, head_size, bias=False)
         self.value = nn.Linear(n_embed, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-    
+        self.dropuout = nn.Dropout(droupout)
+
     def forward(self, x):
         B, T, C = x.shape
         k = self.key(x)
@@ -82,6 +83,7 @@ class Head(nn.Module):
         wei = torch.bmm(q, k.transpose(1, 2)) / (C**0.5)  # scaled dot-product attention
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
         v = self.value(x)
         return torch.bmm(wei, v)
 
@@ -90,9 +92,12 @@ class MultiHead(nn.Module):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
         self.proj = nn.Linear(num_heads * head_size, n_embed)  # Projection layer
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.proj(torch.cat([h(x) for h in self.heads], dim=-1))
+        out = self.proj(torch.cat([h(x) for h in self.heads], dim=-1))
+        out = self.dropout(out)
+        return out
 
 class FeedForward(nn.Module):
     def __init__(self):
@@ -102,7 +107,8 @@ class FeedForward(nn.Module):
             nn.ReLU(),
             nn.Linear(n_embed*4, n_embed),
             nn.ReLU(),
-            nn.Linear(n_embed, n_embed)
+            nn.Linear(n_embed, n_embed),
+            nn.Dropout(dropout)
         )
     
     def forward(self, x):
@@ -128,9 +134,9 @@ class Bigram(nn.Module):
         self.embed_table = nn.Embedding(var_size, n_embed)
         self.position_embedding_table = nn.Embedding(block_size, n_embed)
         self.blocks = nn.Sequential(
-            Block(n_embed, n_head=6),
-            Block(n_embed, n_head=6),
-            Block(n_embed, n_head=6),
+            Block(n_embed, n_head=8),
+            Block(n_embed, n_head=8),
+            Block(n_embed, n_head=8),
         )
         self.lm_head = nn.Linear(n_embed, var_size)
     
@@ -176,19 +182,19 @@ def estimate_loss():
         out[split] = losses.mean()
     model.train()
     return out
+def main():
+    model = Bigram().to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    for i in range(max_iters):
+        if i % eval_interval == 0:
+            losses = estimate_loss()
+            print(f"Step {i}: {losses}")
 
-model = Bigram().to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-for i in range(max_iters):
-    if i % eval_interval == 0:
-        losses = estimate_loss()
-        print(f"Step {i}: {losses}")
+        x, y = get_batch('train')
+        logits, loss = model(x, y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
 
-    x, y = get_batch('train')
-    logits, loss = model(x, y)
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-
-filename = 'llmhaiku.sav'
-pickle.dump(model, open(filename, 'wb'))
+    filename = 'llmhaiku.sav'
+    pickle.dump(model, open(filename, 'wb'))
